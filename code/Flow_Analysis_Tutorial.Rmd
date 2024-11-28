@@ -1,0 +1,251 @@
+---
+title: "Flow_Analysis_tutorial_2024"
+author: "Ben Barry"
+date: "2024-11-26"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Install packages
+```{r installing the required packages}
+#You can either do library(BiocManager) and install("flowCore) or what I have done below.
+BiocManager::install("flowCore") #interpret .fcs files
+BiocManager::install("flowViz") #basic visulisation
+BiocManager::install("ggcyto") #advanced visulisation using the ggPlot nomenclature
+BiocManager::install("openCyto") #Used to link various analysis methodologies
+BiocManager::install("flowWorkspace") #used to build anaysis templates
+BiocManager::install("CytoML") #imports FlowJo and DiVA workspaces
+
+#These packages largly require each other to work (except flowCore which is the "base package) 
+#so will often load each other without my help.  For simplicty I have loaded them all.
+
+#You will need to "clean" your data.  flowAI and flowCut are my recomendations.  
+#flowClean is the original, but is supeceeded by flowCut
+BiocManager::install("flowAI")
+BiocManager::install("flowClean")
+BiocManager::install("flowCut")
+
+#The CytoExploreR package is not available on bioconductor and needs to be loaded straight from GitHub.  To do this you need the package devtools.
+install.packages("devtools")
+
+#An intresting project is CytoExploreR that trys to blend the power of R with the ease of use of a mouse.
+devtools::install_github("DillonHammill/CytoExploreRData")
+devtools::install_github("DillonHammill/CytoExploreR", build_vignettes = FALSE)
+
+```
+
+# Part 1: Downloading the Flow Dataset.
+I was unable to download data from FlowRepository, however I found some data from a different tutorial
+https://jchellmuth.com/posts/FACS-with-R/
+this data is very simple only measureing desinged only to measure change in GFP (FITC-A) - however it serves the same for this pupose. 
+
+```{r download Flow dataset}
+FlowFiles <- list.files(
+  path = "/Users/benbarry/Documents/Flow_Analysis_tutorial_2024/data/2020-07-08-FACS-data/",
+  pattern = ".fcs$"
+)
+
+FlowSet <- flowCore::read.flowSet(FlowFiles, path = "/Users/benbarry/Documents/Flow_Analysis_tutorial_2024/data/2020-07-08-FACS-data/")
+
+FlowSet
+FlowSet[[1]] #view the first FCS files
+```
+
+# Part II: compensation cleaning and transforming
+## Compensation:
+Corrects for spectral overlap the method here uses a compensation matrix - however there since this is a simple dataset
+the compensation matrix is very simple. 
+
+## Cleaning:
+here cleaning refers to a quick QC check 
+It consists in the detection and removal of anomalies by checking three properties of flow cytometry: 1) flow rate, 2) signal acquisition, 3) dynamic range.
+
+## Transfomring:
+here we are transforming the data to make it more interpertable using a logical transform. Logicle transformation creates a subset of biexponentialTransform hyperbolic sine transformation functions that provides several advantages over linear/log transformations for display of flow cytometry data.
+
+```{r compensation, cleaning, tranfomration of flow data}
+library(flowCore)
+library(flowAI)
+library(ggcyto)
+
+#load a single file 
+singleFile <- "/Users/benbarry/Documents/Flow_Analysis_tutorial_2024/data/2020-07-08-FACS-data/Specimen_001_B2_B02_001.fcs"
+
+fcsFile <- read.FCS(singleFile)
+fcsFile
+names(fcsFile)
+exprs(fcsFile)
+each_col(fcsFile, median)
+keyword(fcsFile)
+
+#compensation
+spillover(fcsFile)
+fcsFileComp <- compensate(fcsFile, spillover(fcsFile)$SPILL)
+
+#cleaning the data
+fcsFileCompClean <- flow_auto_qc(fcsFileComp)
+fcsFileCompClean
+
+#transforming the data 
+trans <- estimateLogicle(fcsFileCompClean, colnames(fcsFileCompClean[, 7:8]))
+
+fcsFileCompCleanTrans <- transform(fcsFileCompClean, trans)
+
+
+#visualise the results
+autoplot(fcsFileCompCleanTrans)
+autoplot(fcsFileCompClean)
+autoplot(fcsFileCompCleanTrans, x = "FITC-A", y = "Pacific Blue-A", bin = 200)
+autoplot(fcsFileCompCleanTrans, x = "Time", y = "Pacific Blue-A", bin = 200)
+
+#working with a full flowset.
+FlowFiles <- list.files(
+  path = "/Users/benbarry/Documents/Flow_Analysis_tutorial_2024/data/2020-07-08-FACS-data/",
+  pattern = ".fcs$")
+
+corrupted_files <- c("Specimen_001_C11_C11_020.fcs",
+                     "Specimen_001_C9_C09_018.fcs", 
+                     "Specimen_001_D11_D11_030.fcs")
+
+FlowFiles <- FlowFiles[!FlowFiles %in% corrupted_files]
+
+FlowSet <- flowCore::read.flowSet(FlowFiles, 
+                                  path = "/Users/benbarry/Documents/Flow_Analysis_tutorial_2024/data/2020-07-08-FACS-data/")
+
+FlowSet 
+spillover(FlowSet[[1]])
+FlowSet_Comp <- compensate(FlowSet, spillover(FlowSet[[1]])$SPILL)
+FlowSet_Comp_Clean <- flow_auto_qc(FlowSet_Comp) #several files seemed to be corrupted these were removed. 
+FlowSet_Trans <- estimateLogicle(FlowSet_Comp_Clean[[1]], colnames(FlowSet_Comp_Clean[[1]][, 7:8]))
+FlowSet_Comp_Clean_Trans <- transform(FlowSet_Comp_Clean, FlowSet_Trans)
+autoplot(FlowSet_Comp_Clean_Trans[[1]] , x = "FITC-A", y = "Pacific Blue-A", bin = 200)
+
+```
+
+# Manual gating
+## Part III: Gating - Manual 
+
+Cell gating isolates cells based on forward and side scatter (FSC-A vs. SSC-A) to remove debris. Singlet gating is then applied using FSC-H vs. FSC-W to exclude doublets or cell clumps. The `gs_get_pop_paths()` function shows how data flows from the cell gate to the singlet gate, applying each filter sequentially.
+
+```{r gating - manual and auto}
+#plotting here with sample 13
+autoplot(FlowSet_Comp_Clean_Trans[[13]])
+
+ggcyto(FlowSet_Comp_Clean_Trans[[13]], 
+       aes(x = "FSC-A",
+           y = "SSC-A")) + 
+  geom_hex(bins = 200)
+
+gs <- GatingSet(FlowSet_Comp_Clean_Trans) #create an empty gating set 
+
+# gating cells 
+rectangle <- rectangleGate("FSC-A" = c(75000, Inf),
+                           filterId = "NoneDebris")
+
+gs_pop_add(gs, rectangle, parent = "root")
+recompute(gs)
+gs_get_pop_paths(gs)
+
+ggcyto(FlowSet_Comp_Clean_Trans[[13]], 
+       aes(x = "FSC-A",
+           y = "SSC-A")) + 
+  geom_hex(bins = 200) + 
+  geom_gate(gs_pop_get_gate(gs, "NoneDebris"))
+
+gs_pop_get_stats(gs)
+
+# singlet gating
+
+ggcyto(FlowSet_Comp_Clean_Trans[[13]], 
+       aes(x = "FSC-H",
+           y = "FSC-W")) + 
+  geom_hex(bins = 200) +
+  scale_x_continuous(n.breaks = 8)
+
+rec2 <- rectangleGate("FSC-H"=c(2e4, 1.1e5),"FSC-W"=c(5e4, 1.25e5))
+gs_pop_add(gs, rec2, parent = "NoneDebris", name = "singlets")
+gs_get_pop_paths(gs)
+recompute(gs)
+
+ggcyto(FlowSet_Comp_Clean_Trans[[25]], 
+       aes(x = "FSC-H",
+           y = "FSC-W")) + 
+  geom_hex(bins = 200) + 
+  geom_gate(gs_pop_get_gate(gs, "singlets"))
+
+## exploring the gating set
+
+plot(gs)
+gs_pop_get_stats(gs)
+gs_pop_get_stats(gs, "NoneDebris", "percent")
+```
+
+## Part IV: Gating - Auto
+
+This section automates the gating process using the `openCyto` package. The `noneDebrisGate` is applied using a flowClust 2D method to remove debris, based on FSC-A vs. SSC-A, which is similar to the manual gating approach but now automated across all samples. Next, singlet gating is performed automatically using FSC-A vs. FSC-H to exclude doublets, similar to the manual approach but applied in an automated manner using `fsApply`. Next we apply quad gating on two channels (FITC-A vs. Pacific Blue-A), which further subdivides the data into four populations. one limitation here is that really the `noneDebrisGate` should be set on a control sample and applied across all samples. 
+
+###  Part IV: Gating - Auto basic Stats
+The `pop.quantiles()` function calculates the 75th percentile (Q3) for each channel in the dataset, providing a measure of the upper distribution for each population. The `pop.mean()` function computes the mean expression value for each channel across the gated population, offering an average intensity measure for each channel. These functions are applied to each gated population using `gs_pop_get_stats()`, which helps summarize the data by calculating these statistical metrics across the different gates.
+
+
+```{r auto gating}
+library(openCyto)
+AutoGate <- GatingSet(FlowSet_Comp_Clean_Trans)
+
+
+#cell gate - removing debris
+
+Flowset_Data <- gs_pop_get_data(AutoGate)
+noneDebrisGate <- fsApply(Flowset_Data, function(fr) openCyto::gate_flowclust_2d(fr, xChannel = "FSC-A", yChannel = "SSC-A"))
+gs_pop_add(AutoGate, noneDebrisGate, parent = "root", name = "noneDebrisGate")
+recompute(AutoGate)
+autoplot(AutoGate[[13]], x = "FSC-A", y = "SSC-A", "noneDebrisGate",  bins = 200)
+
+#Singlet gating 
+
+Flowset_Data <- gs_pop_get_data(AutoGate, "noneDebrisGate")
+singletGate <- fsApply(Flowset_Data, function(fr) openCyto:::.singletGate(fr, channels = c("FSC-A","FSC-H")))
+
+gs_pop_add(AutoGate, singletGate, parent = "noneDebrisGate", name = "singlets")
+recompute(AutoGate)
+autoplot(AutoGate[[1]], x = 'FSC.A', y = 'FSC.H', "singlets", bins = 256)
+
+plot(AutoGate)
+gs_pop_get_stats(AutoGate)
+gs_pop_get_stats(AutoGate, "noneDebrisGate", "percent")
+
+
+#Quad gating. 
+Flowset_Data <- gs_pop_get_data(AutoGate, "singlets") 
+gateQuad <- fsApply(Flowset_Data, function(fr) gate_quad_sequential(fr, channels = c("FITC-A", "Pacific Blue-A"), gFunc = "mindensity"))
+gs_pop_add(AutoGate, gateQuad, parent = "singlets", names = c("1", "2", "3", "4"))
+recompute(AutoGate)
+gs_get_pop_paths(AutoGate[[1]])
+plot(AutoGate)
+autoplot(AutoGate[[13]], x = "FITC-A", y = "Pacific Blue-A", gs_get_pop_paths(AutoGate)[4:7], bins = 150)
+
+
+gs_pop_get_stats(AutoGate)
+gs_pop_get_stats(AutoGate, "noneDebrisGate", "percent")
+
+pop.quantiles <- function(fr){
+  channels = colnames(fr)
+  res <- matrixStats::colQuantiles(exprs(fr), probs = 0.75)
+  names(res) <- channels
+  res
+}
+
+gs_pop_get_stats(AutoGate, gs_get_pop_paths(AutoGate), type = pop.quantiles)
+
+pop.mean <- function(fr){
+  channels <- colnames(fr)
+  res <- colMeans(exprs(fr))
+  names(res) <- channels
+  res
+}
+gs_pop_get_stats(AutoGate, gs_get_pop_paths(AutoGate), type = pop.mean)
+
+```
